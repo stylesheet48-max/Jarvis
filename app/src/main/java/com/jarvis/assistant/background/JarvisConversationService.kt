@@ -92,6 +92,14 @@ class JarvisConversationService : Service() {
         const val ACTION_START_CONVERSATION = "com.jarvis.assistant.START_CONVERSATION"
         const val ACTION_STOP_ALL = "com.jarvis.assistant.STOP_ALL"
         const val ACTION_ENTER_STANDBY = "com.jarvis.assistant.ENTER_STANDBY"
+        const val ACTION_ENTER_SLEEP = "com.jarvis.assistant.ENTER_SLEEP"
+
+        private val _voiceState = MutableStateFlow(com.jarvis.assistant.data.model.JarvisVoiceState.SLEEP)
+        val voiceState: StateFlow<com.jarvis.assistant.data.model.JarvisVoiceState> = _voiceState.asStateFlow()
+
+        fun enterSleep() {
+            activeInstance?.transitionToSleep("Direct sleep command invoked")
+        }
 
         private const val CHANNEL_ID = "jarvis_conversation"
         private const val NOTIFICATION_ID = 41
@@ -710,6 +718,7 @@ class JarvisConversationService : Service() {
                 beginActiveConversation()
             }
             ACTION_ENTER_STANDBY -> enterStandby(announce = false)
+            ACTION_ENTER_SLEEP -> transitionToSleep("Received ACTION_ENTER_SLEEP intent")
             ACTION_STOP_ALL -> {
                 fullStop()
                 return START_NOT_STICKY
@@ -793,6 +802,7 @@ class JarvisConversationService : Service() {
 
         _isSessionOn.value = true
         _isStandby.value = false
+        _voiceState.value = com.jarvis.assistant.data.model.JarvisVoiceState.ACTIVE_CONVERSATION
         lastResponseTimedOut = false
         val now = System.currentTimeMillis()
         lastUserSpeechDetectedTime = now
@@ -1000,9 +1010,9 @@ class JarvisConversationService : Service() {
                                 cancelAllActiveTools()
                             }
                             if (isExplicitStandbyCommand(userText)) {
-                                Log.i("JarvisService", "Detected explicit background / standby command in user speech: '$userText'")
+                                Log.i("JarvisService", "Detected explicit background / sleep command in user speech: '$userText'")
                                 minimizeToHomeScreen()
-                                enterStandby(announce = true)
+                                transitionToSleep("Speech recognized sleep command: $userText")
                                 return
                             }
                             app.memoryManager.learnPreferencesFromConversation(currentTurnUserText.toString())
@@ -2111,7 +2121,7 @@ class JarvisConversationService : Service() {
                             result.put("message", "REFUSED: a task is still running. Do NOT go to background. Continue the task, or tell the user honestly what is blocking it.")
                         } else {
                             minimizeToHomeScreen()
-                            enterStandby(announce = false)
+                            transitionToSleep("Tool call go_to_background")
                             result.put("success", true)
                             result.put("message", "Sent JARVIS to background standby mode.")
                         }
@@ -3003,8 +3013,33 @@ class JarvisConversationService : Service() {
     // Standby / wake-word listening (Pure Vosk - Continuous Streaming)
     // ---------------------------------------------------------------------
 
+    fun transitionToSleep(reason: String = "Sleep requested") {
+        Log.i("JarvisService", "transitionToSleep: $reason")
+        abandonAudioDuckFocus()
+        com.jarvis.assistant.audio.JarvisSoundEffects.playStandbySound()
+        isPendingBackgroundTransition = false
+        stopActiveConversation()
+        currentTurnAssistantText.clear()
+        currentTurnUserText.clear()
+        hasSpeechInCurrentUtterance = false
+        hasSignalledUtteranceEnd = false
+        _isSessionOn.value = false
+        _voiceState.value = com.jarvis.assistant.data.model.JarvisVoiceState.SLEEP
+        _isStandby.value = true
+        standbyActivatedTime = System.currentTimeMillis()
+        updateNotification()
+
+        serviceScope.launch(Dispatchers.Main) {
+            delay(500)
+            if (_isStandby.value && voskSpeechService == null) {
+                startWakeListening()
+            }
+        }
+    }
+
     private fun enterStandby(announce: Boolean = false) {
         if (_isStandby.value) return
+        _voiceState.value = com.jarvis.assistant.data.model.JarvisVoiceState.STANDBY_WAKE_WORD
         abandonAudioDuckFocus()
         com.jarvis.assistant.audio.JarvisSoundEffects.playStandbySound()
         isPendingBackgroundTransition = false
@@ -3055,8 +3090,8 @@ class JarvisConversationService : Service() {
 
         try {
             standbyActivatedTime = System.currentTimeMillis()
-            // Phrase grammar: allow single-word "jarvis", multi-syllable wake phrases, and [unk]
-            val grammar = "[\"jarvis\", \"hey jarvis\", \"hi jarvis\", \"hello jarvis\", \"ok jarvis\", \"okay jarvis\", \"wake up jarvis\", \"sun jarvis\", \"suno jarvis\", \"jarvis jarvis\", \"[unk]\"]"
+            // Phrase grammar: allow "jarvis", "myra", multi-syllable wake phrases, and [unk]
+            val grammar = "[\"jarvis\", \"hey jarvis\", \"hi jarvis\", \"hello jarvis\", \"ok jarvis\", \"okay jarvis\", \"wake up jarvis\", \"sun jarvis\", \"suno jarvis\", \"jarvis jarvis\", \"myra\", \"hey myra\", \"hi myra\", \"hello myra\", \"ok myra\", \"suno myra\", \"[unk]\"]"
             val rec = Recognizer(model, 16000.0f, grammar)
             rec.setWords(true)
             val spkModel = VoskModelManager.speakerModel
@@ -3121,7 +3156,13 @@ class JarvisConversationService : Service() {
         "wake up jarvis",
         "sun jarvis",
         "suno jarvis",
-        "jarvis jarvis"
+        "jarvis jarvis",
+        "myra",
+        "hey myra",
+        "hi myra",
+        "hello myra",
+        "ok myra",
+        "suno myra"
     )
 
     private fun checkVoskHypothesis(hypothesisJson: String?) {
@@ -3166,7 +3207,8 @@ class JarvisConversationService : Service() {
             val cleanPhrase = wordList.joinToString(" ")
             val isMatch = cleanPhrase in VALID_WAKE_PHRASES ||
                     VALID_WAKE_PHRASES.any { cleanPhrase.contains(it) } ||
-                    wordList.contains("jarvis")
+                    wordList.contains("jarvis") ||
+                    wordList.contains("myra")
 
             if (!isMatch) {
                 Log.d("JarvisService", "WAKE REJECTED: '$cleanPhrase' is not an exact valid wake phrase.")
@@ -3181,22 +3223,21 @@ class JarvisConversationService : Service() {
             Log.i("JarvisService", "Vosk candidate hypothesis: '$cleanPhrase' (words=$wordList, avgConf=$avgConf, duration=${duration}s)")
 
             // 4. Acoustic Verification:
-            // 4. Acoustic Verification:
-            // "jarvis" must be specifically recognized with confidence
-            val jarvisConf = wordConfMap["jarvis"] ?: 0.0
-            if (jarvisConf < 0.70) {
-                Log.w("JarvisService", "WAKE REJECTED: 'jarvis' word confidence too low ($jarvisConf < 0.70). Ignored.")
+            // "jarvis" or "myra" must be specifically recognized with confidence
+            val keywordConf = maxOf(wordConfMap["jarvis"] ?: 0.0, wordConfMap["myra"] ?: 0.0)
+            if (keywordConf < 0.70) {
+                Log.w("JarvisService", "WAKE REJECTED: Keyword confidence too low ($keywordConf < 0.70). Ignored.")
                 return
             }
 
-            if (wordList.size == 1 && wordList[0] == "jarvis") {
-                // Standalone single-word "jarvis"
+            if (wordList.size == 1 && (wordList[0] == "jarvis" || wordList[0] == "myra")) {
+                // Standalone single-word
                 if (avgConf < 0.75) {
-                    Log.w("JarvisService", "WAKE REJECTED: Standalone 'jarvis' failed checks (conf=$avgConf). Ignored.")
+                    Log.w("JarvisService", "WAKE REJECTED: Standalone keyword failed checks (conf=$avgConf). Ignored.")
                     return
                 }
             } else {
-                // Multi-word phrases like "hey jarvis", "hello jarvis", "ok jarvis"
+                // Multi-word phrases like "hey jarvis", "hey myra", "hello jarvis"
                 if (avgConf < 0.65) {
                     Log.w("JarvisService", "WAKE REJECTED: Wake phrase failed checks (conf=$avgConf). Ignored.")
                     return
@@ -3376,8 +3417,9 @@ class JarvisConversationService : Service() {
             "go to background", "go background", "go in background", "go in the background",
             "background me jao", "background mein jao", "send to background", "move to background",
             "minimize", "go home", "go to home", "go to home screen",
-            "go to sleep", "sleep jarvis", "enter standby", "standby mode", "go to standby",
-            "take a break", "so jao"
+            "go to sleep", "sleep jarvis", "jarvis go to sleep", "enter standby", "standby mode", "go to standby",
+            "take a break", "so jao", "jarvis so jao", "ab so jao", "sleeping mode", "sleep mode",
+            "myra go to sleep", "sleep myra", "myra so jao"
         )
         return patterns.any { containsPhrase(clean, it) }
     }

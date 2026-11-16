@@ -115,21 +115,38 @@ class PermissionActivity : AppCompatActivity() {
         val hasLoc = PermissionHelper.hasLocationPermission(this)
         val hasNotif = PermissionHelper.hasNotificationPermission(this)
         val hasOverlay = PermissionHelper.hasOverlayPermission(this)
-        val hasA11y = PermissionHelper.isAccessibilityServiceEnabled(this)
+        val isA11yConfigured = PermissionHelper.isAccessibilityPermissionConfiguredInSettings(this)
+        val isA11yConnected = PermissionHelper.isAccessibilityServiceConnected()
+        val isA11yOperational = isA11yConfigured && isA11yConnected
 
         updateCardState(hasMic, binding.tvStatusMic, binding.btnGrantMic)
         updateCardState(hasLoc, binding.tvStatusLocation, binding.btnGrantLocation)
         updateCardState(hasNotif, binding.tvStatusNotification, binding.btnGrantNotification)
         updateCardState(hasOverlay, binding.tvStatusOverlay, binding.btnGrantOverlay)
-        updateCardState(hasA11y, binding.tvStatusAccessibility, binding.btnGrantAccessibility)
+
+        if (isA11yOperational) {
+            binding.tvStatusAccessibility.text = "Operational & Bound ✓"
+            binding.tvStatusAccessibility.setTextColor(Color.parseColor("#10B981"))
+            binding.btnGrantAccessibility.text = "Manage"
+        } else if (isA11yConfigured && !isA11yConnected) {
+            binding.tvStatusAccessibility.text = "Enabled in Settings • Service Unbound\n(Toggle OFF & ON in Settings to reconnect)"
+            binding.tvStatusAccessibility.setTextColor(Color.parseColor("#F59E0B"))
+            binding.btnGrantAccessibility.text = "Reconnect"
+        } else {
+            binding.tvStatusAccessibility.text = "Action Required • Tap Grant"
+            binding.tvStatusAccessibility.setTextColor(Color.parseColor("#F59E0B"))
+            binding.btnGrantAccessibility.text = "Grant"
+        }
+
         updateExtraPermission("contacts", PermissionHelper.hasContactsPermission(this))
         updateExtraPermission("phone", hasPermission(Manifest.permission.CALL_PHONE))
         updateExtraPermission("camera", hasPermission(Manifest.permission.CAMERA))
         updateExtraPermission("bluetooth", Build.VERSION.SDK_INT < Build.VERSION_CODES.S || hasPermission(Manifest.permission.BLUETOOTH_CONNECT))
         updateExtraPermission("battery", PermissionHelper.hasBatteryOptimizationPermission(this))
+        updateExtraPermission("autostart", true)
         updateExtraPermission("brightness", PermissionHelper.hasWriteSettingsPermission(this))
 
-        if (hasMic && hasLoc && hasNotif && hasA11y) {
+        if (hasMic && hasLoc && hasNotif && isA11yOperational) {
             binding.btnGrantAll.text = "ALL ESSENTIAL PERMISSIONS GRANTED ✓"
             binding.btnGrantAll.alpha = 0.7f
             binding.btnGrantAll.isEnabled = false
@@ -239,8 +256,13 @@ class PermissionActivity : AppCompatActivity() {
         card("bluetooth", "Nearby Bluetooth devices", "Optional: allows JARVIS to detect and route audio to a connected headset.", com.jarvis.assistant.R.drawable.ic_settings_plug) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) bluetoothLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT) else PermissionHelper.openAppSettings(this)
         }
-        card("battery", "Background battery access", "Recommended on Vivo devices so voice service and overlay can stay active in the background.", com.jarvis.assistant.R.drawable.ic_settings_silent) {
+        card("battery", "Background battery access", "Recommended so voice service and overlay can stay active in the background.", com.jarvis.assistant.R.drawable.ic_settings_silent) {
             PermissionHelper.requestBatteryOptimization(this)
+        }
+        card("autostart", "Xiaomi / HyperOS Autostart", "Prevents Xiaomi, Redmi & HyperOS from killing JARVIS accessibility when clearing Recents.", com.jarvis.assistant.R.drawable.ic_settings_shield) {
+            if (!PermissionHelper.openXiaomiAutostartSettings(this)) {
+                PermissionHelper.openAppSettings(this)
+            }
         }
         card("brightness", "Modify system settings", "Optional: lets JARVIS adjust screen brightness when you ask.", com.jarvis.assistant.R.drawable.ic_settings_palette) {
             PermissionHelper.requestWriteSettings(this)

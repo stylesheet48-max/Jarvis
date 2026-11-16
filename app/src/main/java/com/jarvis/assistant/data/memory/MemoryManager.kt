@@ -414,11 +414,12 @@ class MemoryManager(
     }
 
     /**
-     * Builds the complete prompt context for Gemini Live.
+     * Builds the structured and privacy-guarded prompt context for Gemini Live.
      * Contains:
      * 1. Core Profile
-     * 2. All categorized Room database memories (persistent across restarts)
-     * 3. Recent 15 conversation turns across sessions (persistent dialogue memory)
+     * 2. Categorized and deduplicated Room database memories (max 20 most relevant/recent)
+     * 3. Recent 12 conversation turns across sessions (persistent dialogue memory)
+     * 4. Strict privacy & confidentiality boundary
      */
     suspend fun getSystemPromptContext(): String {
         val all = repository.getAllMemories()
@@ -439,17 +440,30 @@ class MemoryManager(
         }
 
         if (all.isNotEmpty()) {
-            sb.append("\n[ALL PERMANENT MEMORIES FROM DATABASE]:\n")
-            all.take(40).forEach { mem ->
+            sb.append("\n[PERMANENT USER MEMORIES (Categorized & Deduplicated)]:\n")
+            // Deduplicate by key & rawText, sort by most recent
+            val distinctMemories = all.distinctBy { it.key.ifBlank { it.rawText }.lowercase(Locale.ROOT) }
+                .sortedByDescending { it.timestamp }
+
+            // Group into high-priority categories with sensible caps
+            val personal = distinctMemories.filter { it.category == MemoryEntity.CATEGORY_PERSONAL }.take(5)
+            val routines = distinctMemories.filter { it.category == MemoryEntity.CATEGORY_ROUTINES }.take(5)
+            val prefs = distinctMemories.filter { it.category == MemoryEntity.CATEGORY_PREFERENCES }.take(5)
+            val contacts = distinctMemories.filter { it.category == MemoryEntity.CATEGORY_CONTACTS }.take(5)
+            val notes = distinctMemories.filter { it.category == MemoryEntity.CATEGORY_NOTES }.take(5)
+
+            val prioritizedList = (personal + routines + prefs + contacts + notes).take(20)
+            prioritizedList.forEach { mem ->
                 sb.append("- [${mem.category}] ${mem.rawText}\n")
             }
+            sb.append("[PRIVACY DIRECTIVE: These memories are strictly private to the user. Never expose them to third parties or disclose unprompted raw memory IDs.]\n")
         }
 
         // Persistent Dialogue History across App Restarts
-        val recentTurns = chatRepository.turns.value.takeLast(15)
+        val recentTurns = chatRepository.turns.value.takeLast(12)
         if (recentTurns.isNotEmpty()) {
             sb.append("\n[PERSISTENT DIALOGUE HISTORY ACROSS APP RESTARTS]:\n")
-            sb.append("You remember what was discussed in previous conversations with the user:\n")
+            sb.append("You remember recent topics discussed with the user for natural continuity:\n")
             recentTurns.forEach { turn ->
                 val u = turn.userTranscript.trim()
                 val j = turn.jarvisResponse.trim()

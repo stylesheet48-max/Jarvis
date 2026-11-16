@@ -29,6 +29,24 @@ import kotlinx.coroutines.flow.asStateFlow
 
 class JarvisAccessibilityService : AccessibilityService() {
 
+    enum class AccessibilityHealthStatus {
+        DISABLED_IN_SETTINGS,
+        PERMISSION_CONFIGURED_UNBOUND,
+        CONNECTED_OPERATIONAL,
+        INTERRUPTED,
+        UNBOUND,
+        ERROR
+    }
+
+    data class HealthSnapshot(
+        val status: AccessibilityHealthStatus,
+        val isBound: Boolean,
+        val lastEventTimestamp: Long,
+        val totalEventsReceived: Long,
+        val lastConnectedTimestamp: Long,
+        val lastErrorDescription: String?
+    )
+
     data class UiChange(val revision: Long, val packageName: String, val eventType: Int, val timestamp: Long)
 
     companion object {
@@ -36,12 +54,44 @@ class JarvisAccessibilityService : AccessibilityService() {
         private val _uiChanges = MutableStateFlow(UiChange(0L, "", 0, 0L))
         val uiChanges: StateFlow<UiChange> = _uiChanges.asStateFlow()
 
+        private val _healthStatus = MutableStateFlow(AccessibilityHealthStatus.PERMISSION_CONFIGURED_UNBOUND)
+        val healthStatus: StateFlow<AccessibilityHealthStatus> = _healthStatus.asStateFlow()
+
+        @Volatile
+        var lastEventTimestamp: Long = 0L
+            private set
+
+        @Volatile
+        var totalEventsReceived: Long = 0L
+            private set
+
+        @Volatile
+        var lastConnectedTimestamp: Long = 0L
+            private set
+
+        @Volatile
+        var lastErrorDescription: String? = null
+            internal set
+
         @Volatile
         var instance: JarvisAccessibilityService? = null
             private set
 
         fun isRunning(): Boolean = instance != null
         fun isEnabled(): Boolean = instance != null
+
+        fun getHealthSnapshot(): HealthSnapshot {
+            val inst = instance
+            val isBound = inst != null
+            return HealthSnapshot(
+                status = if (!isBound) AccessibilityHealthStatus.UNBOUND else _healthStatus.value,
+                isBound = isBound,
+                lastEventTimestamp = lastEventTimestamp,
+                totalEventsReceived = totalEventsReceived,
+                lastConnectedTimestamp = lastConnectedTimestamp,
+                lastErrorDescription = lastErrorDescription
+            )
+        }
 
         fun triggerWhatsAppSend(targetText: String? = null) {
             instance?.armWhatsAppSend(targetText)
@@ -204,7 +254,25 @@ class JarvisAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        lastConnectedTimestamp = System.currentTimeMillis()
+        _healthStatus.value = AccessibilityHealthStatus.CONNECTED_OPERATIONAL
         Log.i(TAG, "JarvisAccessibilityService connected and active")
+
+        try {
+            val info = serviceInfo ?: android.accessibilityservice.AccessibilityServiceInfo()
+            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            info.feedbackType = android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_GENERIC
+            info.notificationTimeout = 100
+            info.flags = info.flags or
+                android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                android.accessibilityservice.AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+            serviceInfo = info
+            Log.i(TAG, "Dynamic serviceInfo configured with TYPES_ALL_MASK and FLAG_INCLUDE_NOT_IMPORTANT_VIEWS")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to apply dynamic serviceInfo flags: ${e.message}")
+        }
+
         ensureJarvisServiceActive()
     }
 
@@ -218,6 +286,9 @@ class JarvisAccessibilityService : AccessibilityService() {
                 androidx.core.content.ContextCompat.startForegroundService(this, intent)
                 Log.i(TAG, "JarvisAccessibilityService ensured JarvisConversationService is running in standby")
             }
+        } catch (e: IllegalStateException) {
+            // Android 14 (API 34) ForegroundServiceStartNotAllowedException
+            Log.w(TAG, "ForegroundServiceStartNotAllowed: Deferring conversation service start: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start JarvisConversationService from accessibility service: ${e.message}")
         }
@@ -225,6 +296,9 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
+        lastEventTimestamp = System.currentTimeMillis()
+        totalEventsReceived++
+        _healthStatus.value = AccessibilityHealthStatus.CONNECTED_OPERATIONAL
         val pkg = event.packageName?.toString().orEmpty()
         if (event.eventType in setOf(
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
@@ -307,10 +381,32 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        Log.w(TAG, "JarvisAccessibilityService interrupted")
+        Log.w(TAG, "JarvisAccessibilityService interrupted by system")
+        _healthStatus.value = AccessibilityHealthStatus.INTERRUPTED
+        lastErrorDescription = "Interrupted by system at ${System.currentTimeMillis()}"
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        Log.w(TAG, "JarvisAccessibilityService onUnbind received from OS")
+        _healthStatus.value = AccessibilityHealthStatus.UNBOUND
+        if (instance === this) {
+            instance = null
+        }
+        // Critical: returning true ensures Android calls onRebind when re-binding
+        return true
+    }
+
+    override fun onRebind(intent: Intent?) {
+        super.onRebind(intent)
+        instance = this
+        lastConnectedTimestamp = System.currentTimeMillis()
+        _healthStatus.value = AccessibilityHealthStatus.CONNECTED_OPERATIONAL
+        Log.i(TAG, "JarvisAccessibilityService reconnected via onRebind")
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "JarvisAccessibilityService onDestroy")
+        _healthStatus.value = AccessibilityHealthStatus.UNBOUND
         if (instance === this) instance = null
         super.onDestroy()
     }
@@ -1077,6 +1173,140 @@ class JarvisAccessibilityService : AccessibilityService() {
         return false
     }
 
+    /**
+     * Performs a calibrated long-press gesture (press and hold) at (x, y) for [durationMs].
+     */
+    fun longPressAt(x: Float, y: Float, durationMs: Long = 700L): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                val path = Path().apply { moveTo(x, y) }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+                    .build()
+                val ok = dispatchGesture(gesture, null, null)
+                Log.i(TAG, "Dispatched long-press at ($x, $y) duration=${durationMs}ms: $ok")
+                return ok
+            } catch (e: Exception) {
+                Log.e(TAG, "Long-press gesture at ($x, $y) failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    /**
+     * Performs a rapid double-tap gesture at (x, y).
+     */
+    fun doubleTapAt(x: Float, y: Float): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                val path = Path().apply { moveTo(x, y) }
+                val stroke1 = GestureDescription.StrokeDescription(path, 0, 50)
+                val stroke2 = GestureDescription.StrokeDescription(path, 150, 50)
+                val gesture = GestureDescription.Builder()
+                    .addStroke(stroke1)
+                    .addStroke(stroke2)
+                    .build()
+                val ok = dispatchGesture(gesture, null, null)
+                Log.i(TAG, "Dispatched double-tap at ($x, $y): $ok")
+                return ok
+            } catch (e: Exception) {
+                Log.e(TAG, "Double-tap gesture at ($x, $y) failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    /**
+     * Performs a precise free-directional swipe gesture from (startX, startY) to (endX, endY).
+     */
+    fun swipe(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 400L): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                val path = Path().apply {
+                    moveTo(startX, startY)
+                    lineTo(endX, endY)
+                }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+                    .build()
+                val ok = dispatchGesture(gesture, null, null)
+                Log.i(TAG, "Dispatched swipe ($startX, $startY) -> ($endX, $endY) duration=${durationMs}ms: $ok")
+                return ok
+            } catch (e: Exception) {
+                Log.e(TAG, "Swipe gesture failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    /**
+     * Performs a drag and drop gesture: press-and-hold at start, drag to destination, and release.
+     */
+    fun dragAndDrop(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        holdDurationMs: Long = 600L,
+        dragDurationMs: Long = 500L
+    ): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val holdPath = Path().apply { moveTo(startX, startY) }
+                val stroke1 = GestureDescription.StrokeDescription(holdPath, 0, holdDurationMs, true)
+                val movePath = Path().apply {
+                    moveTo(startX, startY)
+                    lineTo(endX, endY)
+                }
+                val stroke2 = stroke1.continueStroke(movePath, 0, dragDurationMs, false)
+                val gesture = GestureDescription.Builder()
+                    .addStroke(stroke1)
+                    .addStroke(stroke2)
+                    .build()
+                val ok = dispatchGesture(gesture, null, null)
+                Log.i(TAG, "Dispatched continuous drag-and-drop: ($startX, $startY) -> ($endX, $endY): $ok")
+                return ok
+            } catch (e: Exception) {
+                Log.e(TAG, "dragAndDrop continueStroke failed, falling back: ${e.message}")
+            }
+        }
+        // Fallback swipe with combined duration
+        return swipe(startX, startY, endX, endY, holdDurationMs + dragDurationMs)
+    }
+
+    /**
+     * Performs long press targeting a node rectangle (preferring ACTION_LONG_CLICK, falling back to gesture).
+     */
+    fun performLongPressAtRect(rect: Rect, durationMs: Long = 700L): Boolean {
+        if (rect.width() <= 0 || rect.height() <= 0) return false
+        val cx = rect.exactCenterX()
+        val cy = rect.exactCenterY()
+        val root = getActiveRootNode()
+        var node = root?.let { findNodeCoveringRect(it, rect) }
+        while (node != null) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (node.isVisibleToUser && node.isLongClickable && bounds.contains(cx.toInt(), cy.toInt())) {
+                if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
+                    Log.i(TAG, "performLongPressAtRect succeeded via ACTION_LONG_CLICK on ${node.className}")
+                    return true
+                }
+                break
+            }
+            node = node.parent
+        }
+        Log.i(TAG, "Falling back to coordinate long-press gesture at ($cx, $cy)")
+        return longPressAt(cx, cy, durationMs)
+    }
+
+    /**
+     * Performs double tap targeting a node rectangle.
+     */
+    fun performDoubleTapAtRect(rect: Rect): Boolean {
+        if (rect.width() <= 0 || rect.height() <= 0) return false
+        return doubleTapAt(rect.exactCenterX(), rect.exactCenterY())
+    }
+
     // ---------------------------------------------------------------
     // Reference YouTube & Accessibility Actions
     // ---------------------------------------------------------------
@@ -1451,10 +1681,12 @@ class JarvisAccessibilityService : AccessibilityService() {
         // accessibility action; use a coordinate gesture only when no actionable node
         // resolves or ACTION_CLICK explicitly returns false.
         val root = getActiveRootNode()
-        // Chrome's WebView targets often expose a clickable accessibility wrapper that
+        val pkg = root?.packageName?.toString() ?: ""
+        val isBrowser = pkg.contains("chrome", true) || pkg.contains("browser", true)
+        // Browser/WebView targets often expose a clickable accessibility wrapper that
         // acknowledges ACTION_CLICK without forwarding the tap to the page control.
         // Prefer a real screen gesture there, then retain the node action as fallback.
-        if (root?.packageName?.toString() == "com.android.chrome" && clickAt(cx, cy)) return true
+        if (isBrowser && clickAt(cx, cy)) return true
         var node = root?.let { findNodeCoveringRect(it, rect) }
         while (node != null) {
             val bounds = Rect()
@@ -1469,32 +1701,119 @@ class JarvisAccessibilityService : AccessibilityService() {
         return clickAt(cx, cy)
     }
 
-    fun performSmartScroll(direction: String, distance: String = "small"): Boolean {
+    fun findFirstScrollableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (node.isScrollable && node.isVisibleToUser) {
+            val b = Rect()
+            node.getBoundsInScreen(b)
+            if (b.width() > 80 && b.height() > 80) return node
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findFirstScrollableNode(child)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    fun performSmartScroll(
+        direction: String,
+        distance: String = "small",
+        targetRect: Rect? = null,
+        scrollableNode: AccessibilityNodeInfo? = null
+    ): Boolean {
+        val dir = direction.lowercase(Locale.ROOT)
+        val dist = distance.lowercase(Locale.ROOT)
+        val root = getActiveRootNode()
+
+        // 1. Resolve scrollable node if not explicitly provided
+        val nodeToScroll = scrollableNode ?: (if (targetRect != null && root != null) {
+            findNodeCoveringRect(root, targetRect)?.let { n ->
+                var curr: AccessibilityNodeInfo? = n
+                while (curr != null) {
+                    if (curr.isScrollable) break
+                    curr = curr.parent
+                }
+                curr
+            }
+        } else null) ?: findFirstScrollableNode(root)
+
+        // 2. Attempt semantic accessibility scroll first if supported
+        if (nodeToScroll != null) {
+            val semanticAction = when (dir) {
+                "down" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                "up" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                "right" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                "left" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                else -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            }
+            if (nodeToScroll.actionList.any { it.id == semanticAction }) {
+                try {
+                    if (nodeToScroll.performAction(semanticAction)) {
+                        Log.i(TAG, "Semantic scroll ($dir) succeeded on node: ${nodeToScroll.className}")
+                        return true
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Semantic scroll failed: ${e.message}, falling back to gesture")
+                }
+            }
+        }
+
+        // 3. Fallback to calibrated gesture within container bounds
+        val containerBounds = Rect()
+        if (targetRect != null && targetRect.width() > 50 && targetRect.height() > 50) {
+            containerBounds.set(targetRect)
+        } else if (nodeToScroll != null) {
+            nodeToScroll.getBoundsInScreen(containerBounds)
+        }
+
         val dm = resources.displayMetrics
-        val width = dm.widthPixels.toFloat()
-        val height = dm.heightPixels.toFloat()
+        val screenW = dm.widthPixels.toFloat()
+        val screenH = dm.heightPixels.toFloat()
 
-        // Calculate delta based on distance:
-        // "small" = gentle line-by-line scroll (~18% of screen height, moving 1-2 rows at a time with 0 fling)
-        // "medium" = ~30% of screen height
-        // "large" = ~45% of screen height
-        val deltaY = when (distance.lowercase()) {
-            "small" -> height * 0.18f
-            "large" -> height * 0.45f
-            else -> height * 0.28f
+        val left: Float
+        val right: Float
+        val top: Float
+        val bottom: Float
+
+        if (containerBounds.width() > 80 && containerBounds.height() > 80) {
+            left = containerBounds.left.toFloat().coerceAtLeast(0f)
+            right = containerBounds.right.toFloat().coerceAtMost(screenW)
+            top = containerBounds.top.toFloat().coerceAtLeast(0f)
+            bottom = containerBounds.bottom.toFloat().coerceAtMost(screenH)
+        } else {
+            // Safe screen bounds away from status bar (top 8%) and nav bar (bottom 8%)
+            left = 0f
+            right = screenW
+            top = screenH * 0.08f
+            bottom = screenH * 0.92f
         }
-        val durationMs = when (distance.lowercase()) {
-            "small" -> 600L  // Slow, controlled drag with ZERO fling momentum
+
+        val containerW = (right - left).coerceAtLeast(100f)
+        val containerH = (bottom - top).coerceAtLeast(100f)
+
+        val deltaY = when (dist) {
+            "small" -> containerH * 0.20f
+            "large" -> containerH * 0.50f
+            else -> containerH * 0.35f
+        }
+        val deltaX = when (dist) {
+            "small" -> containerW * 0.25f
+            "large" -> containerW * 0.60f
+            else -> containerW * 0.40f
+        }
+        val durationMs = when (dist) {
+            "small" -> 600L
             "large" -> 400L
-            else -> 550L
+            else -> 500L
         }
 
-        val (startX, startY, endX, endY) = when (direction.lowercase()) {
-            "down" -> listOf(width * 0.5f, height * 0.58f, width * 0.5f, height * 0.58f - deltaY)
-            "up" -> listOf(width * 0.5f, height * 0.42f, width * 0.5f, height * 0.42f + deltaY)
-            "left" -> listOf(width * 0.75f, height * 0.5f, width * 0.25f, height * 0.5f)
-            "right" -> listOf(width * 0.25f, height * 0.5f, width * 0.75f, height * 0.5f)
-            else -> listOf(width * 0.5f, height * 0.58f, width * 0.5f, height * 0.58f - deltaY)
+        val (startX, startY, endX, endY) = when (dir) {
+            "down" -> listOf(left + containerW * 0.5f, top + containerH * 0.65f, left + containerW * 0.5f, top + containerH * 0.65f - deltaY)
+            "up" -> listOf(left + containerW * 0.5f, top + containerH * 0.35f, left + containerW * 0.5f, top + containerH * 0.35f + deltaY)
+            "left" -> listOf(left + containerW * 0.75f, top + containerH * 0.5f, left + containerW * 0.75f - deltaX, top + containerH * 0.5f)
+            "right" -> listOf(left + containerW * 0.25f, top + containerH * 0.5f, left + containerW * 0.25f + deltaX, top + containerH * 0.5f)
+            else -> listOf(left + containerW * 0.5f, top + containerH * 0.65f, left + containerW * 0.5f, top + containerH * 0.65f - deltaY)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -1507,7 +1826,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                     .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
                     .build()
                 val dispatched = dispatchGesture(gesture, null, null)
-                Log.i(TAG, "Dispatched scroll $direction gesture (distance=$distance, deltaY=$deltaY, duration=${durationMs}ms): $dispatched")
+                Log.i(TAG, "Dispatched container scroll $dir (bounds: [$left,$top,$right,$bottom], deltaY=$deltaY, duration=${durationMs}ms): $dispatched")
                 return dispatched
             } catch (e: Exception) {
                 Log.e(TAG, "Scroll gesture failed: ${e.message}")

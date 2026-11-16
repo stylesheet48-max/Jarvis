@@ -80,14 +80,66 @@ object PermissionHelper {
         }
     }
 
-    fun isAccessibilityServiceEnabled(context: Context): Boolean {
-        if (JarvisAccessibilityService.isRunning()) return true
+    fun isAccessibilityPermissionConfiguredInSettings(context: Context): Boolean {
         val serviceName = "${context.packageName}/${JarvisAccessibilityService::class.java.canonicalName}"
+        val shortServiceName = "${context.packageName}/.automation.accessibility.JarvisAccessibilityService"
         val enabledServices = Settings.Secure.getString(
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
-        return enabledServices.contains(serviceName)
+        return enabledServices.contains(serviceName) || enabledServices.contains(shortServiceName)
+    }
+
+    fun isAccessibilityServiceConnected(): Boolean {
+        return JarvisAccessibilityService.instance != null
+    }
+
+    fun isAccessibilityServiceOperational(context: Context): Boolean {
+        return isAccessibilityServiceConnected() && isAccessibilityPermissionConfiguredInSettings(context)
+    }
+
+    fun isAccessibilityServiceEnabled(context: Context): Boolean {
+        return isAccessibilityServiceConnected() || isAccessibilityPermissionConfiguredInSettings(context)
+    }
+
+    fun getAccessibilityDetailedState(context: Context): String {
+        val configured = isAccessibilityPermissionConfiguredInSettings(context)
+        val connected = isAccessibilityServiceConnected()
+        return when {
+            configured && connected -> "OPERATIONAL"
+            configured && !connected -> "STALLED_UNBOUND"
+            else -> "DISABLED"
+        }
+    }
+
+    fun openXiaomiAutostartSettings(context: Context): Boolean {
+        return try {
+            val intent = Intent().apply {
+                component = android.content.ComponentName(
+                    "com.miui.securitycenter",
+                    "com.miui.permcenter.autostart.AutoStartManagementActivity"
+                )
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            true
+        } catch (_: Exception) {
+            try {
+                val intent = Intent().apply {
+                    component = android.content.ComponentName(
+                        "com.miui.securitycenter",
+                        "com.miui.powerkeeper.ui.HiddenAppsConfigActivity"
+                    )
+                    putExtra("package_name", context.packageName)
+                    putExtra("package_label", "JARVIS")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
     }
 
     fun openAccessibilitySettings(context: Context) {
