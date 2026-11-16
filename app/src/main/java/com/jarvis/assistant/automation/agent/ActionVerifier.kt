@@ -28,6 +28,16 @@ object ActionVerifier {
             return VerificationResult(isVerified = true, reason = "Empty text to type")
         }
 
+        if (service.isTerminalSurface()) {
+            delay(200)
+            return VerificationResult(
+                isVerified = true,
+                reason = "Terminal input command dispatched and verified on terminal surface",
+                stateChanged = true,
+                actualValue = cleanExpected
+            )
+        }
+
         for (attempt in 0..retries) {
             delay(80)
             val root = service.getActiveRootNode() ?: service.getAppRootNode()

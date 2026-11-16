@@ -544,8 +544,136 @@ class GeminiLiveWebSocket(
                                         put("type", "STRING")
                                         put("description", "Additional visual context.")
                                     })
+                                    put("action_type", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "Type of touch: 'click' (default single tap), 'long_press', or 'double_tap'.")
+                                    })
+                                    put("duration_ms", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Optional duration for long_press in milliseconds (defaults to 700ms).")
+                                    })
                                 })
                                 put("required", JSONArray().put("target_name"))
+                            })
+                        })
+
+                        // 16b. long_press_element
+                        put(JSONObject().apply {
+                            put("name", "long_press_element")
+                            put("description", "Performs a long-press (press and hold) gesture on a grounded UI element, message bubble, terminal, or coordinates to open context menus, select items, or activate secondary options.")
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("target_name", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "Label, text, icon name, or description of the element to long press.")
+                                    })
+                                    put("element_id", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Optional element ID.")
+                                    })
+                                    put("duration_ms", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Hold duration in ms (defaults to 700ms).")
+                                    })
+                                    put("x", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Normalized X coordinate (0-1000).")
+                                    })
+                                    put("y", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Normalized Y coordinate (0-1000).")
+                                    })
+                                })
+                                put("required", JSONArray().put("target_name"))
+                            })
+                        })
+
+                        // 16c. double_tap_element
+                        put(JSONObject().apply {
+                            put("name", "double_tap_element")
+                            put("description", "Performs a rapid double-tap gesture on a grounded UI element, photo, or coordinates (e.g. to zoom, like, or select words).")
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("target_name", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "Label or description of the target.")
+                                    })
+                                    put("element_id", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Optional element ID.")
+                                    })
+                                    put("x", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Normalized X coordinate (0-1000).")
+                                    })
+                                    put("y", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Normalized Y coordinate (0-1000).")
+                                    })
+                                })
+                                put("required", JSONArray().put("target_name"))
+                            })
+                        })
+
+                        // 16d. drag_and_drop
+                        put(JSONObject().apply {
+                            put("name", "drag_and_drop")
+                            put("description", "Performs a drag and drop gesture: press-and-hold at start coordinates, drag across screen, and release at destination coordinates.")
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("start_x", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Normalized start X coordinate (0-1000).")
+                                    })
+                                    put("start_y", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Normalized start Y coordinate (0-1000).")
+                                    })
+                                    put("end_x", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Normalized destination X coordinate (0-1000).")
+                                    })
+                                    put("end_y", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Normalized destination Y coordinate (0-1000).")
+                                    })
+                                    put("hold_duration_ms", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Initial hold duration before drag starts (defaults to 500ms).")
+                                    })
+                                })
+                                put("required", JSONArray().put("start_x").put("start_y").put("end_x").put("end_y"))
+                            })
+                        })
+
+                        // 16e. text_action
+                        put(JSONObject().apply {
+                            put("name", "text_action")
+                            put("description", "Performs rich text editing and clipboard operations on focused inputs or named fields: 'select_all', 'copy', 'cut', 'paste', 'clear', or 'set_selection'.")
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("action", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "Operation: 'select_all', 'copy', 'cut', 'paste', 'clear', or 'set_selection'.")
+                                    })
+                                    put("target_input_name", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "Optional name or label of the input field.")
+                                    })
+                                    put("start_selection", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "Start index for set_selection.")
+                                    })
+                                    put("end_selection", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "End index for set_selection.")
+                                    })
+                                })
+                                put("required", JSONArray().put("action"))
                             })
                         })
 
@@ -595,6 +723,10 @@ class GeminiLiveWebSocket(
                                     put("distance", JSONObject().apply {
                                         put("type", "STRING")
                                         put("description", "Optional scroll distance: 'small' (gentle line-by-line scroll, moves 1-2 rows at a time with zero fling, mandatory for browsing photos and documents), 'medium' (half screen), or 'large' (full page). Defaults to 'small'.")
+                                    })
+                                    put("target_container", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "Optional label or description of the specific list, container, or pane to scroll.")
                                     })
                                 })
                                 put("required", JSONArray().put("direction"))

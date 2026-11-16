@@ -1054,6 +1054,21 @@ class VisualTaskOrchestrator(
             return@withContext TaskActionResult(false, "Accessibility Service is not running.")
         }
 
+        // Fast path: Termux terminal text & command input
+        if (service.isTerminalSurface()) {
+            AgentTaskEngine.setState(AgentTaskEngine.State.ACTING)
+            val typed = mutateUi("type-terminal:$text") { service.typeIntoTerminal(text, submit) }
+            delay(if (submit) 400L else 200L)
+            val currentRoot = service.getActiveRootNode()
+            val summary = groundingEngine.formatElementsSummary(groundingEngine.scanScreen(currentRoot), currentRoot)
+            return@withContext TaskActionResult(
+                success = typed,
+                message = if (typed) "Typed into Termux terminal: '$text' (submit=$submit)." else "Failed to type into terminal.",
+                currentStateSummary = summary,
+                verified = typed
+            )
+        }
+
         // Resolve target input element
         var targetRect: Rect? = null
         val rootForTyping = service.getAppRootNode() ?: service.getActiveRootNode()
@@ -1337,9 +1352,15 @@ class VisualTaskOrchestrator(
     }
 
     /**
-     * Performs a directional scroll with loop guard.
+     * Performs a directional scroll with container targeting and loop guard.
      */
-    suspend fun handleScroll(direction: String, distance: String = "small"): TaskActionResult = withContext(Dispatchers.IO) {
+    suspend fun handleScroll(
+        direction: String,
+        distance: String = "small",
+        targetContainer: String? = null,
+        containerX: Int? = null,
+        containerY: Int? = null
+    ): TaskActionResult = withContext(Dispatchers.IO) {
         AgentTaskEngine.setState(AgentTaskEngine.State.OBSERVING)
         val service = JarvisAccessibilityService.instance
         if (service == null) {
@@ -1359,12 +1380,31 @@ class VisualTaskOrchestrator(
             )
         }
 
+        // 1. Resolve container rectangle if a target container was specified
+        var containerRect: Rect? = null
+        val root = service.getActiveRootNode()
+        val elements = if (root != null) groundingEngine.scanScreen(root) else emptyList()
+
+        if (!targetContainer.isNullOrBlank()) {
+            val matchedContainer = groundingEngine.findTargetElement(elements, targetContainer)
+            if (matchedContainer != null) {
+                containerRect = matchedContainer.bounds
+                Log.i(TAG, "Scrolling strictly inside container '${matchedContainer.primaryLabel}' bounds: $containerRect")
+            }
+        } else if (containerX != null && containerY != null) {
+            val dm = service.resources.displayMetrics
+            val px = (containerX / 1000f) * dm.widthPixels
+            val py = (containerY / 1000f) * dm.heightPixels
+            containerRect = Rect((px - 150).toInt(), (py - 150).toInt(), (px + 150).toInt(), (py + 150).toInt())
+            Log.i(TAG, "Scrolling inside coordinate-anchored container bounds: $containerRect")
+        }
+
         AgentTaskEngine.setState(AgentTaskEngine.State.ACTING)
-        val preSignature = com.jarvis.assistant.automation.agent.ScreenSignatureCalculator.computeSignature(service.getActiveRootNode())
-        val success = mutateUi("scroll:$direction") { service.performSmartScroll(direction, distance) }
+        val preSignature = com.jarvis.assistant.automation.agent.ScreenSignatureCalculator.computeSignature(root)
+        val success = mutateUi("scroll:$direction") { service.performSmartScroll(direction, distance, targetRect = containerRect) }
         AgentTaskEngine.current()?.scrollCount = (AgentTaskEngine.current()?.scrollCount ?: 0) + 1
         dispatchImmediateScreenFrame()
-        val uiWait = waitForUiState(preSignature, expectedPackage = service.getActiveRootNode()?.packageName?.toString(), timeoutMs = 8_000L)
+        val uiWait = waitForUiState(preSignature, expectedPackage = root?.packageName?.toString(), timeoutMs = 8_000L)
         val rootAfter = uiWait.root ?: service.getActiveRootNode()
         val postSignature = uiWait.signature ?: com.jarvis.assistant.automation.agent.ScreenSignatureCalculator.computeSignature(rootAfter)
         if (postSignature.isEquivalentTo(preSignature)) {
@@ -1404,6 +1444,197 @@ class VisualTaskOrchestrator(
             message = "Scrolled screen $direction (scroll #$consecutiveScrollCount, distance: $distance).",
             currentStateSummary = groundingEngine.formatElementsSummary(elementsAfter, rootAfter),
             verified = success && uiWait.ready && !postSignature.isEquivalentTo(preSignature)
+        )
+    }
+
+    /**
+     * Performs a calibrated long press at a grounded element or screen coordinates.
+     */
+    suspend fun handleLongPress(
+        targetName: String,
+        elementId: Int? = null,
+        durationMs: Long = 700L,
+        x: Int? = null,
+        y: Int? = null
+    ): TaskActionResult = withContext(Dispatchers.IO) {
+        resetScrollCount()
+        val service = JarvisAccessibilityService.instance
+            ?: return@withContext TaskActionResult(false, "Accessibility Service is not running.")
+
+        val root = service.getActiveRootNode() ?: service.getAppRootNode()
+        val elements = if (root != null) groundingEngine.scanScreen(root) else emptyList()
+        val preSignature = com.jarvis.assistant.automation.agent.ScreenSignatureCalculator.computeSignature(root)
+
+        val target = if (!targetName.isBlank() || elementId != null) {
+            groundingEngine.findTargetElement(elements, targetName, elementId = elementId)
+        } else null
+
+        val ok: Boolean
+        if (target != null) {
+            Log.i(TAG, "Executing long press on grounded target '${target.primaryLabel}' at bounds ${target.bounds} (duration=${durationMs}ms)")
+            ok = mutateUi("long-press:${target.primaryLabel}") {
+                service.performLongPressAtRect(target.bounds, durationMs)
+            }
+        } else if (x != null && y != null && x in 0..1000 && y in 0..1000) {
+            val dm = service.resources.displayMetrics
+            val px = (x / 1000f) * dm.widthPixels
+            val py = (y / 1000f) * dm.heightPixels
+            Log.i(TAG, "Executing long press at visual coordinates ($x, $y) -> ($px, $py) (duration=${durationMs}ms)")
+            ok = mutateUi("long-press:($x,$y)") {
+                service.longPressAt(px, py, durationMs)
+            }
+        } else {
+            return@withContext TaskActionResult(
+                success = false,
+                message = "Long press target '$targetName' not found on screen and no coordinates provided.",
+                currentStateSummary = groundingEngine.formatElementsSummary(elements, root)
+            )
+        }
+
+        delay(400L)
+        dispatchImmediateScreenFrame()
+        val postRoot = service.getActiveRootNode()
+        val postSignature = com.jarvis.assistant.automation.agent.ScreenSignatureCalculator.computeSignature(postRoot)
+        val verified = !postSignature.isEquivalentTo(preSignature)
+
+        return@withContext TaskActionResult(
+            success = ok,
+            message = if (ok) "Long-pressed '$targetName' for ${durationMs}ms. Inspect screen for contextual menu or selection changes."
+                      else "Could not perform long press on '$targetName'.",
+            currentStateSummary = groundingEngine.formatElementsSummary(groundingEngine.scanScreen(postRoot), postRoot),
+            verified = verified
+        )
+    }
+
+    /**
+     * Performs a rapid double-tap gesture on a grounded element or screen coordinates.
+     */
+    suspend fun handleDoubleTap(
+        targetName: String,
+        elementId: Int? = null,
+        x: Int? = null,
+        y: Int? = null
+    ): TaskActionResult = withContext(Dispatchers.IO) {
+        resetScrollCount()
+        val service = JarvisAccessibilityService.instance
+            ?: return@withContext TaskActionResult(false, "Accessibility Service is not running.")
+
+        val root = service.getActiveRootNode() ?: service.getAppRootNode()
+        val elements = if (root != null) groundingEngine.scanScreen(root) else emptyList()
+        val preSignature = com.jarvis.assistant.automation.agent.ScreenSignatureCalculator.computeSignature(root)
+
+        val target = if (!targetName.isBlank() || elementId != null) {
+            groundingEngine.findTargetElement(elements, targetName, elementId = elementId)
+        } else null
+
+        val ok: Boolean
+        if (target != null) {
+            Log.i(TAG, "Executing double-tap on grounded target '${target.primaryLabel}' at bounds ${target.bounds}")
+            ok = mutateUi("double-tap:${target.primaryLabel}") {
+                service.performDoubleTapAtRect(target.bounds)
+            }
+        } else if (x != null && y != null && x in 0..1000 && y in 0..1000) {
+            val dm = service.resources.displayMetrics
+            val px = (x / 1000f) * dm.widthPixels
+            val py = (y / 1000f) * dm.heightPixels
+            Log.i(TAG, "Executing double-tap at visual coordinates ($x, $y) -> ($px, $py)")
+            ok = mutateUi("double-tap:($x,$y)") {
+                service.doubleTapAt(px, py)
+            }
+        } else {
+            return@withContext TaskActionResult(
+                success = false,
+                message = "Double-tap target '$targetName' not found on screen.",
+                currentStateSummary = groundingEngine.formatElementsSummary(elements, root)
+            )
+        }
+
+        delay(350L)
+        dispatchImmediateScreenFrame()
+        val postRoot = service.getActiveRootNode()
+        val postSignature = com.jarvis.assistant.automation.agent.ScreenSignatureCalculator.computeSignature(postRoot)
+
+        return@withContext TaskActionResult(
+            success = ok,
+            message = if (ok) "Double-tapped '$targetName'." else "Failed to double-tap '$targetName'.",
+            currentStateSummary = groundingEngine.formatElementsSummary(groundingEngine.scanScreen(postRoot), postRoot),
+            verified = !postSignature.isEquivalentTo(preSignature)
+        )
+    }
+
+    /**
+     * Performs a calibrated drag and drop gesture from start coordinates to end coordinates.
+     */
+    suspend fun handleDragAndDrop(
+        startX: Int,
+        startY: Int,
+        endX: Int,
+        endY: Int,
+        holdDurationMs: Long = 500L
+    ): TaskActionResult = withContext(Dispatchers.IO) {
+        resetScrollCount()
+        val service = JarvisAccessibilityService.instance
+            ?: return@withContext TaskActionResult(false, "Accessibility Service is not running.")
+
+        val dm = service.resources.displayMetrics
+        val pStartX = (startX / 1000f) * dm.widthPixels
+        val pStartY = (startY / 1000f) * dm.heightPixels
+        val pEndX = (endX / 1000f) * dm.widthPixels
+        val pEndY = (endY / 1000f) * dm.heightPixels
+
+        Log.i(TAG, "Executing drag-and-drop: ($startX, $startY) -> ($endX, $endY) physical: ($pStartX, $pStartY) -> ($pEndX, $pEndY)")
+        val ok = mutateUi("drag-and-drop") {
+            service.dragAndDrop(pStartX, pStartY, pEndX, pEndY, holdDurationMs, 500L)
+        }
+
+        delay(400L)
+        dispatchImmediateScreenFrame()
+        val postRoot = service.getActiveRootNode()
+
+        return@withContext TaskActionResult(
+            success = ok,
+            message = if (ok) "Dragged from ($startX, $startY) to ($endX, $endY)." else "Drag and drop gesture failed.",
+            currentStateSummary = groundingEngine.formatElementsSummary(groundingEngine.scanScreen(postRoot), postRoot),
+            verified = ok
+        )
+    }
+
+    /**
+     * Performs rich text editing operations (select_all, copy, cut, paste, clear, set_selection).
+     */
+    suspend fun handleTextAction(
+        action: String,
+        targetInputName: String? = null,
+        textArg: String? = null,
+        startSelection: Int? = null,
+        endSelection: Int? = null
+    ): TaskActionResult = withContext(Dispatchers.IO) {
+        resetScrollCount()
+        val service = JarvisAccessibilityService.instance
+            ?: return@withContext TaskActionResult(false, "Accessibility Service is not running.")
+
+        val root = service.getActiveRootNode() ?: service.getAppRootNode()
+        val elements = if (root != null) groundingEngine.scanScreen(root) else emptyList()
+
+        var targetRect: Rect? = null
+        if (!targetInputName.isNullOrBlank()) {
+            val target = groundingEngine.findTargetElement(elements, targetInputName)
+            if (target != null) targetRect = target.bounds
+        }
+
+        val act = action.lowercase(Locale.ROOT)
+        Log.i(TAG, "Executing text action '$act' (target=$targetInputName)")
+        val ok = mutateUi("text-action:$act") {
+            service.performTextAction(act, targetRect, textArg, startSelection, endSelection)
+        }
+
+        delay(250L)
+        val postRoot = service.getActiveRootNode()
+        return@withContext TaskActionResult(
+            success = ok,
+            message = if (ok) "Text action '$act' performed successfully." else "Text action '$act' was not accepted.",
+            currentStateSummary = groundingEngine.formatElementsSummary(groundingEngine.scanScreen(postRoot), postRoot),
+            verified = ok
         )
     }
 

@@ -1671,7 +1671,8 @@ class JarvisConversationService : Service() {
 
                 val isAutomationTool = name in setOf(
                     "open_app", "open_website", "search_in_chrome",
-                    "click_ui_element", "type_text", "scroll_screen", "press_key"
+                    "click_ui_element", "type_text", "scroll_screen", "press_key",
+                    "long_press_element", "double_tap_element", "drag_and_drop", "text_action"
                 )
                 if (isAutomationTool && autonomousHardStop) {
                     Log.w("JarvisService", "Automation tool '$name' refused: hard stop is active.")
@@ -1714,7 +1715,8 @@ class JarvisConversationService : Service() {
                     }
                 }
 
-                if (name in setOf("click_ui_element", "type_text", "scroll_screen", "press_key")) {
+                if (name in setOf("click_ui_element", "type_text", "scroll_screen", "press_key",
+                        "long_press_element", "double_tap_element", "drag_and_drop", "text_action")) {
                     val expectedPackage = expectedPackageForTask(autonomousTaskGoal)
                     val activePackage = com.jarvis.assistant.automation.accessibility.JarvisAccessibilityService.instance
                         ?.getActiveRootNode()?.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty()
@@ -2141,21 +2143,27 @@ class JarvisConversationService : Service() {
                         val desc = args.optString("description", "")
                         val x = if (args.has("x")) args.optInt("x") else null
                         val y = if (args.has("y")) args.optInt("y") else null
+                        val actionType = args.optString("action_type", "click").lowercase(Locale.ROOT)
+                        val durationMs = if (args.has("duration_ms")) args.optLong("duration_ms", 1000L) else 1000L
                         val orchestrator = com.jarvis.assistant.vision.VisualTaskOrchestrator.getInstance()
                         val activeRootForBatch = com.jarvis.assistant.automation.accessibility.JarvisAccessibilityService.instance?.getActiveRootNode()
                         val hasExplicitInstagramUnlike = activeRootForBatch?.packageName?.toString()?.contains("instagram", true) == true &&
                             com.jarvis.assistant.vision.UiGroundingEngine().scanScreen(activeRootForBatch).any {
                                 it.isClickable && it.primaryLabel.trim().startsWith("Unlike", true)
                             }
-                        val actionRes = if (isInstagramBulkTask() && hasExplicitInstagramUnlike) {
-                            orchestrator.runInstagramBulkUnlike(autonomousTaskGoal)
-                        } else orchestrator.handleClick(
+                        val actionRes = when (actionType) {
+                            "long_press" -> orchestrator.handleLongPress(targetName, elementId, durationMs, x, y)
+                            "double_tap" -> orchestrator.handleDoubleTap(targetName, elementId, x, y)
+                            else -> if (isInstagramBulkTask() && hasExplicitInstagramUnlike) {
+                                orchestrator.runInstagramBulkUnlike(autonomousTaskGoal)
+                            } else orchestrator.handleClick(
                                 targetName, elementId, desc, isToggle, x, y,
                                 allowChromeMenuForSettings = autonomousTaskGoal.contains("chrome", ignoreCase = true) &&
                                     autonomousTaskGoal.contains("settings", ignoreCase = true),
                                 forbidAddingInstagramLike = isInstagramBulkTask(),
                                 taskGoal = autonomousTaskGoal
                             )
+                        }
                         result.put("success", actionRes.success)
                         result.put("message", actionRes.message)
                         actionRes.verified?.let { result.put("verified", it) }
@@ -2224,6 +2232,9 @@ class JarvisConversationService : Service() {
                     "scroll_screen" -> {
                         val dir = args.optString("direction", "down")
                         val dist = args.optString("distance", "small")
+                        val targetContainer = args.optString("target_container", "").takeIf { it.isNotBlank() }
+                        val containerX = if (args.has("container_x")) args.optInt("container_x") else null
+                        val containerY = if (args.has("container_y")) args.optInt("container_y") else null
                         val orchestrator = com.jarvis.assistant.vision.VisualTaskOrchestrator.getInstance()
                         val activeRootForBatch = com.jarvis.assistant.automation.accessibility.JarvisAccessibilityService.instance?.getActiveRootNode()
                         val hasExplicitInstagramUnlike = activeRootForBatch?.packageName?.toString()?.contains("instagram", true) == true &&
@@ -2232,7 +2243,7 @@ class JarvisConversationService : Service() {
                             }
                         val actionRes = if (isInstagramBulkTask() && hasExplicitInstagramUnlike) {
                             orchestrator.runInstagramBulkUnlike(autonomousTaskGoal)
-                        } else orchestrator.handleScroll(dir, dist)
+                        } else orchestrator.handleScroll(dir, dist, targetContainer, containerX, containerY)
                         result.put("success", actionRes.success)
                         result.put("message", actionRes.message)
                         actionRes.verified?.let { result.put("verified", it) }
@@ -2270,6 +2281,69 @@ class JarvisConversationService : Service() {
                         val actionRes = orchestrator.handleKey(key)
                         result.put("success", actionRes.success)
                         result.put("message", actionRes.message)
+                    }
+
+                    "long_press_element" -> {
+                        val targetName = args.optString("target_name", "")
+                        val elementId = if (args.has("element_id")) args.optInt("element_id") else null
+                        val durationMs = if (args.has("duration_ms")) args.optLong("duration_ms", 1000L) else 1000L
+                        val x = if (args.has("x")) args.optInt("x") else null
+                        val y = if (args.has("y")) args.optInt("y") else null
+                        val orchestrator = com.jarvis.assistant.vision.VisualTaskOrchestrator.getInstance()
+                        val actionRes = orchestrator.handleLongPress(targetName, elementId, durationMs, x, y)
+                        result.put("success", actionRes.success)
+                        result.put("message", actionRes.message)
+                        actionRes.verified?.let { result.put("verified", it) }
+                        if (actionRes.currentStateSummary.isNotBlank()) {
+                            result.put("current_screen_elements", actionRes.currentStateSummary)
+                        }
+                    }
+
+                    "double_tap_element" -> {
+                        val targetName = args.optString("target_name", "")
+                        val elementId = if (args.has("element_id")) args.optInt("element_id") else null
+                        val x = if (args.has("x")) args.optInt("x") else null
+                        val y = if (args.has("y")) args.optInt("y") else null
+                        val orchestrator = com.jarvis.assistant.vision.VisualTaskOrchestrator.getInstance()
+                        val actionRes = orchestrator.handleDoubleTap(targetName, elementId, x, y)
+                        result.put("success", actionRes.success)
+                        result.put("message", actionRes.message)
+                        actionRes.verified?.let { result.put("verified", it) }
+                        if (actionRes.currentStateSummary.isNotBlank()) {
+                            result.put("current_screen_elements", actionRes.currentStateSummary)
+                        }
+                    }
+
+                    "drag_and_drop" -> {
+                        val startX = args.optInt("start_x", 500)
+                        val startY = args.optInt("start_y", 500)
+                        val endX = args.optInt("end_x", 500)
+                        val endY = args.optInt("end_y", 500)
+                        val holdDurationMs = if (args.has("hold_duration_ms")) args.optLong("hold_duration_ms", 600L) else 600L
+                        val orchestrator = com.jarvis.assistant.vision.VisualTaskOrchestrator.getInstance()
+                        val actionRes = orchestrator.handleDragAndDrop(startX, startY, endX, endY, holdDurationMs)
+                        result.put("success", actionRes.success)
+                        result.put("message", actionRes.message)
+                        actionRes.verified?.let { result.put("verified", it) }
+                        if (actionRes.currentStateSummary.isNotBlank()) {
+                            result.put("current_screen_elements", actionRes.currentStateSummary)
+                        }
+                    }
+
+                    "text_action" -> {
+                        val action = args.optString("action", "select_all")
+                        val targetInput = args.optString("target_input_name", "").takeIf { it.isNotBlank() }
+                        val textArg = args.optString("text_argument", "").takeIf { it.isNotBlank() }
+                        val startSel = if (args.has("start_selection")) args.optInt("start_selection") else null
+                        val endSel = if (args.has("end_selection")) args.optInt("end_selection") else null
+                        val orchestrator = com.jarvis.assistant.vision.VisualTaskOrchestrator.getInstance()
+                        val actionRes = orchestrator.handleTextAction(action, targetInput, textArg, startSel, endSel)
+                        result.put("success", actionRes.success)
+                        result.put("message", actionRes.message)
+                        actionRes.verified?.let { result.put("verified", it) }
+                        if (actionRes.currentStateSummary.isNotBlank()) {
+                            result.put("current_screen_elements", actionRes.currentStateSummary)
+                        }
                     }
 
                     "task_completed" -> {

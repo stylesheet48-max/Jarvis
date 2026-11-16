@@ -2279,6 +2279,193 @@ class JarvisAccessibilityService : AccessibilityService() {
         return candidates.maxByOrNull { it.second.right }?.first
     }
 
+    // ---------------------------------------------------------------------
+    // Terminal Interaction Engine (Termux & Shell Views)
+    // ---------------------------------------------------------------------
+
+    fun isTerminalSurface(): Boolean {
+        val appRoot = getAppRootNode() ?: getActiveRootNode() ?: return false
+        val pkg = appRoot.packageName?.toString() ?: ""
+        val cls = appRoot.className?.toString() ?: ""
+        return pkg.contains("termux", ignoreCase = true) || cls.contains("Terminal", ignoreCase = true)
+    }
+
+    fun findTerminalView(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (root == null) return null
+        val cls = root.className?.toString() ?: ""
+        if (cls.contains("TerminalView", ignoreCase = true) || cls.contains("Terminal", ignoreCase = true)) {
+            return root
+        }
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i) ?: continue
+            val found = findTerminalView(child)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    fun typeIntoTerminal(textToType: String, submit: Boolean = false): Boolean {
+        Log.i(TAG, "typeIntoTerminal: typing ${textToType.length} chars into terminal (submit=$submit)")
+        val appRoot = getAppRootNode() ?: getActiveRootNode() ?: return false
+        val terminalNode = findTerminalView(appRoot)
+        val dm = resources.displayMetrics
+
+        // 1. Ensure terminal view receives focus and keyboard connection
+        val tapBounds = Rect()
+        if (terminalNode != null) {
+            terminalNode.getBoundsInScreen(tapBounds)
+        } else {
+            tapBounds.set(0, (dm.heightPixels * 0.25f).toInt(), dm.widthPixels, (dm.heightPixels * 0.65f).toInt())
+        }
+        val targetX = tapBounds.exactCenterX()
+        val targetY = tapBounds.exactCenterY()
+        clickAt(targetX, targetY)
+        Thread.sleep(180)
+
+        // 2. Put text into system clipboard for lossless terminal text entry
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        clipboard?.setPrimaryClip(ClipData.newPlainText("TermuxCommand", textToType))
+        Thread.sleep(120)
+
+        // 3. Attempt programmatic PASTE on terminal node if supported
+        var pasted = false
+        if (terminalNode != null && (terminalNode.actionList.any { it.id == AccessibilityNodeInfo.ACTION_PASTE })) {
+            pasted = terminalNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+            Log.i(TAG, "Programmatic terminal ACTION_PASTE: $pasted")
+        }
+
+        // 4. Fallback to long-press context menu / Termux PASTE button
+        if (!pasted) {
+            pasted = performLongPressAndPaste(tapBounds)
+            Log.i(TAG, "Long-press paste into terminal: $pasted")
+        }
+
+        if (!pasted) {
+            // Also check for Termux extra keys row with "PASTE" or "KEY"
+            val pasteKeywords = listOf("paste", "पेस्ट", "paste from clipboard")
+            val pasteBtn = searchNodeForKeywords(appRoot, pasteKeywords) ?: findPasteButtonAcrossWindows()
+            if (pasteBtn != null) {
+                pasted = clickNodeAndTap(pasteBtn)
+                Log.i(TAG, "Clicked detected terminal PASTE button: $pasted")
+            }
+        }
+
+        // 5. If submit is requested, send Enter key
+        if (submit) {
+            Thread.sleep(250)
+            sendEnterKey()
+        }
+        return true
+    }
+
+    fun sendEnterKey(): Boolean {
+        val enterKeywords = listOf("enter", "return", "done", "run")
+        val appRoot = getAppRootNode() ?: getActiveRootNode()
+        if (appRoot != null) {
+            val enterBtn = searchNodeForKeywords(appRoot, enterKeywords)
+            if (enterBtn != null) {
+                val ok = clickNodeAndTap(enterBtn)
+                Log.i(TAG, "Clicked on-screen Enter button: $ok")
+                return ok
+            }
+        }
+
+        // Tap bottom-right keyboard Enter area
+        val dm = resources.displayMetrics
+        val enterX = dm.widthPixels * 0.90f
+        val enterY = dm.heightPixels * 0.94f
+        val ok = clickAt(enterX, enterY)
+        Log.i(TAG, "Dispatched touch tap on soft keyboard Enter key: $ok")
+        return ok
+    }
+
+    // ---------------------------------------------------------------------
+    // Rich Text Selection & Clipboard Actions
+    // ---------------------------------------------------------------------
+
+    fun performTextAction(
+        action: String,
+        targetRect: Rect? = null,
+        textArg: String? = null,
+        startSelection: Int? = null,
+        endSelection: Int? = null
+    ): Boolean {
+        val root = getActiveRootNode() ?: getAppRootNode() ?: return false
+        val node = if (targetRect != null && targetRect.width() > 0) {
+            findNodeCoveringRect(root, targetRect) ?: root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        } else {
+            root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findNodeWithInputFocus(root) ?: findFirstEditableNode(root)
+        }
+
+        val act = action.lowercase(Locale.ROOT)
+        Log.i(TAG, "performTextAction: '$act' on node ${node?.className}")
+
+        return when (act) {
+            "select_all" -> {
+                if (node != null && node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SELECT_ALL }) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_SELECT_ALL)
+                } else if (targetRect != null) {
+                    performDoubleTapAtRect(targetRect)
+                } else {
+                    false
+                }
+            }
+            "copy" -> {
+                if (node != null && node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_COPY }) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_COPY)
+                } else {
+                    val copyBtn = searchNodeForKeywords(root, listOf("copy", "कॉपी", "copy to clipboard"))
+                    if (copyBtn != null) clickNodeAndTap(copyBtn) else false
+                }
+            }
+            "cut" -> {
+                if (node != null && node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CUT }) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_CUT)
+                } else {
+                    val cutBtn = searchNodeForKeywords(root, listOf("cut", "काटें"))
+                    if (cutBtn != null) clickNodeAndTap(cutBtn) else false
+                }
+            }
+            "paste" -> {
+                if (node != null && node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_PASTE }) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                } else if (targetRect != null) {
+                    performLongPressAndPaste(targetRect)
+                } else {
+                    val pasteBtn = findPasteButtonAcrossWindows()
+                    if (pasteBtn != null) clickNodeAndTap(pasteBtn) else false
+                }
+            }
+            "clear" -> {
+                if (node != null) {
+                    val args = Bundle().apply {
+                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+                    }
+                    node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                } else if (targetRect != null) {
+                    clickAt(targetRect.exactCenterX(), targetRect.exactCenterY())
+                    Thread.sleep(100)
+                    false
+                } else {
+                    false
+                }
+            }
+            "set_selection" -> {
+                if (node != null && startSelection != null && endSelection != null &&
+                    node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_SELECTION }) {
+                    val args = Bundle().apply {
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, startSelection)
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, endSelection)
+                    }
+                    node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+                } else {
+                    false
+                }
+            }
+            else -> false
+        }
+    }
+
     fun performSystemGesture(gesture: String): Boolean {
         return when (gesture.lowercase()) {
             "home" -> performGlobalAction(GLOBAL_ACTION_HOME)

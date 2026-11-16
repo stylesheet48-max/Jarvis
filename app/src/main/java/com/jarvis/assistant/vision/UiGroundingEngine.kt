@@ -22,7 +22,8 @@ data class UiElementInfo(
     val isCheckable: Boolean,
     val isChecked: Boolean,
     val isEditable: Boolean,
-    val isScrollable: Boolean
+    val isScrollable: Boolean,
+    val isTerminal: Boolean = false
 ) {
     val center: PointF
         get() = PointF(bounds.exactCenterX(), bounds.exactCenterY())
@@ -113,13 +114,18 @@ class UiGroundingEngine {
                 p = p.parent
                 depth++
             }
-            val isClickable = node.isClickable || parentClickable
+            val isTerminal = cls.contains("TerminalView", true) || cls.contains("Terminal", true)
+            val isClickable = node.isClickable || parentClickable || isTerminal
             val isCheckable = node.isCheckable
             val hasSetTextAction = node.actionList.any { 
                 it.id == AccessibilityNodeInfo.ACTION_SET_TEXT || it.id == AccessibilityNodeInfo.ACTION_PASTE 
             }
-            val isEditable = node.isEditable || cls.contains("EditText", ignoreCase = true) || hasSetTextAction
-            val isScrollable = node.isScrollable
+            val isEditable = node.isEditable || cls.contains("EditText", ignoreCase = true) || hasSetTextAction || isTerminal
+            val isScrollable = node.isScrollable || isTerminal
+
+            if (isTerminal && text.isBlank() && desc.isBlank()) {
+                desc = "Terminal Buffer"
+            }
 
             // If a clickable row/card has no direct text, extract combined text from its descendants
             if (text.isBlank() && desc.isBlank() && node.childCount > 0 && isClickable) {
@@ -150,7 +156,8 @@ class UiGroundingEngine {
                         isCheckable = isCheckable,
                         isChecked = node.isChecked,
                         isEditable = isEditable,
-                        isScrollable = isScrollable
+                        isScrollable = isScrollable,
+                        isTerminal = isTerminal
                     )
                 )
             }
@@ -214,6 +221,11 @@ class UiGroundingEngine {
 
         val query = targetName.trim().lowercase(Locale.ROOT)
         if (query.isBlank()) return null
+
+        if (query == "terminal" || query == "termux" || query == "shell" || query == "console" || query == "terminal buffer" || query == "command line") {
+            val term = elements.firstOrNull { it.isTerminal || it.className.contains("Terminal", true) }
+            if (term != null) return term
+        }
 
         // On Flow itself, brand text is page copy, not a navigation result. Never route
         // a request for Google Flow to the page's own banner/help text.
