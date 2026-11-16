@@ -2402,8 +2402,14 @@ class JarvisAccessibilityService : AccessibilityService() {
 
         return when (act) {
             "select_all" -> {
-                if (node != null && node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SELECT_ALL }) {
-                    node.performAction(AccessibilityNodeInfo.ACTION_SELECT_ALL)
+                if (node != null && node.actionList.any { it.id == AccessibilityNodeInfo.AccessibilityAction.ACTION_SELECT_ALL.id }) {
+                    node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SELECT_ALL.id)
+                } else if (node != null && node.text != null && node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_SELECTION }) {
+                    val args = Bundle().apply {
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, node.text?.length ?: 0)
+                    }
+                    node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
                 } else if (targetRect != null) {
                     performDoubleTapAtRect(targetRect)
                 } else {
