@@ -116,6 +116,27 @@ This implementation addresses the confirmed Accessibility Service disconnection 
 
 ---
 
+### E. In-App Direct OTA Update System (GitHub Releases)
+
+#### 11. `app/src/main/java/com/jarvis/assistant/update/AppUpdateManager.kt` (New File)
+- **GitHub Release Integration**: Queries `https://api.github.com/repos/stylesheet48-max/Jarvis/releases/latest` for new builds.
+- **Direct Streaming Downloader**: Streams `app-debug.apk` directly into app cache/downloads with live progress reporting.
+- **Seamless Package Installer Launch**: Triggers Android's `ACTION_VIEW` intent via `FileProvider` so Android performs an in-place update ("Update" instead of "Install") preserving all local settings, memory, and database.
+
+#### 12. `app/src/main/res/xml/file_paths.xml` & `AndroidManifest.xml`
+- Declared permission `<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />`.
+- Registered `androidx.core.content.FileProvider` for secure content URI resolution across external, cache, and files directories.
+
+#### 13. `app/src/main/java/com/jarvis/assistant/ui/home/UpdatesFragment.kt`
+- Added interactive **"DIRECT OTA UPDATE · GITHUB CLOUD"** card right at the top of the Updates screen.
+- Integrated **"CHECK FOR UPDATES"**, live horizontal download progress bar, and **"DOWNLOAD & INSTALL UPDATE"** actions.
+
+#### 14. `.github/workflows/build-debug.yml`
+- Configured `permissions: contents: write`.
+- Added automated GitHub Release publishing step using `gh release create latest` to maintain a permanent, public rolling release and direct download endpoint.
+
+---
+
 ## 3. Preservation of Invariants
 
 - **Google Gemini Live API Preserved**: Sole AI brain; WebSocket bi-directional streaming intact.

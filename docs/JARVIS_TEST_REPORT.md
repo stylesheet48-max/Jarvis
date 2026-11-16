@@ -11,33 +11,40 @@
 
 | Test Category | Total | Passed | Failed | Not Run (Physical Device Required) |
 |---|---|---|---|---|
-| **Build & Gradle Compilation** | 1 | 0 | 1 (Documented Blocker) | 0 |
-| **Code-Level / Static Verification** | 6 | 6 | 0 | 0 |
+| **Local PRoot Gradle Build** | 1 | 0 | 1 (Documented Blocker) | 0 |
+| **Cloud CI/CD Build (GitHub Actions)** | 1 | 1 | 0 | 0 |
+| **Code-Level / Static Verification** | 8 | 8 | 0 | 0 |
 | **Unit Test Suite (Automation Agent)** | 4 | 0 | 0 | 4 (SDK Required) |
 | **Accessibility Lifecycle & 7 States** | 8 | 0 | 0 | 8 (Physical Device Required) |
 | **Voice, Wake-Word & Sleep System** | 6 | 0 | 0 | 6 (Physical Device Required) |
 | **Personality, Emotion & Gemini Brain** | 4 | 0 | 0 | 4 (Physical Device Required) |
+| **OTA In-App Auto-Update Verification** | 3 | 0 | 0 | 3 (Physical Device Required) |
 
 ---
 
 ## 2. Build & Environment Baseline
 
-### Command Executed:
-```bash
-sh ./gradlew test
-```
+### A. Local Container Baseline
+- **Command Executed**: `sh ./gradlew test`
+- **Result**:
+  ```
+  Could not determine the dependencies of task ':app:testDebugUnitTest'.
+  > SDK location not found. Define a valid SDK location with an ANDROID_HOME environment variable
+    or by setting the sdk.dir path in your project's local properties file at '/mnt/sdcard/Jarvis/local.properties'.
+  ```
+- **Local Blocker Analysis**: The mobile PRoot container contains OpenJDK 17 and Gradle 8.9, but lacks the standalone Android SDK Platform 34 jars.
 
-### Result:
-```
-Could not determine the dependencies of task ':app:testDebugUnitTest'.
-> SDK location not found. Define a valid SDK location with an ANDROID_HOME environment variable
-  or by setting the sdk.dir path in your project's local properties file at '/mnt/sdcard/Jarvis/local.properties'.
-```
-
-### Build Blocker Analysis:
-- **Environment**: The Linux terminal is running inside a PRoot Ubuntu container on an Android/HyperOS device.
-- **Root Cause**: The container contains OpenJDK 17 and Gradle 8.9, but does not have the standalone Android SDK (specifically `compileSdk = 34` / Android 14 platform jars and android build-tools) installed at standard Linux paths (`/usr/lib/android-sdk` or `/root/Android/Sdk`).
-- **Resolution for User**: When opening this project in Android Studio on a computer or on an environment with the Android SDK installed, copy `local.properties.example` to `local.properties` and point `sdk.dir` to the Android SDK directory.
+### B. Cloud CI/CD Build (GitHub Actions — PASSED ✓)
+- **Repository**: `https://github.com/stylesheet48-max/Jarvis`
+- **Workflow**: `.github/workflows/build-debug.yml`
+- **Runs**: Run #43922445884 & #43932750000
+- **Environment**: Ubuntu Latest, Temurin JDK 17, Android SDK 34
+- **Command**: `./gradlew :app:assembleDebug --no-daemon --stacktrace`
+- **Build Status**: **SUCCESS (Completed in 3m 18s)**
+- **Artifact Generated**: `app-debug.apk` (101.28 MiB)
+- **Permanent OTA Release**: [GitHub Release latest](https://github.com/stylesheet48-max/Jarvis/releases/tag/latest)
+- **Direct Download URL**: `https://github.com/stylesheet48-max/Jarvis/releases/latest/download/app-debug.apk`
+- **Local Device File**: `/storage/emulated/0/Jarvis/app-debug.apk` (102 MB, verified present)
 
 ---
 
