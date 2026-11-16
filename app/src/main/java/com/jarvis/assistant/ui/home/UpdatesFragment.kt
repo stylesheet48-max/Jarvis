@@ -8,6 +8,11 @@ import androidx.fragment.app.Fragment
 import android.util.TypedValue
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Button
+import android.widget.ProgressBar
+import androidx.lifecycle.lifecycleScope
+import com.jarvis.assistant.BuildConfig
+import com.jarvis.assistant.update.AppUpdateManager
 import com.jarvis.assistant.databinding.FragmentUpdatesBinding
 
 class UpdatesFragment : Fragment() {
@@ -44,6 +49,9 @@ class UpdatesFragment : Fragment() {
         )
         val list = binding.updatesList
         list.removeAllViews()
+
+        renderOtaUpdateCard(list)
+
         features.forEach { feature ->
             val card = LinearLayout(requireContext()).apply {
                 orientation = LinearLayout.VERTICAL
@@ -74,6 +82,127 @@ class UpdatesFragment : Fragment() {
             })
             list.addView(card)
         }
+    }
+
+    private fun renderOtaUpdateCard(list: LinearLayout) {
+        val ctx = requireContext()
+        val card = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            background = androidx.core.content.ContextCompat.getDrawable(ctx, com.jarvis.assistant.R.drawable.bg_jarvis_card)
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(18)
+            }
+        }
+
+        val tvTag = TextView(ctx).apply {
+            text = "DIRECT OTA UPDATE  ·  GITHUB CLOUD"
+            textSize = 12f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(themeColor(com.jarvis.assistant.R.attr.themeAccent))
+        }
+        card.addView(tvTag)
+
+        val tvTitle = TextView(ctx).apply {
+            text = "Over-The-Air In-App Updates"
+            textSize = 16f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(themeColor(com.jarvis.assistant.R.attr.themeTextPrimary))
+            setPadding(0, dp(6), 0, dp(4))
+        }
+        card.addView(tvTitle)
+
+        val tvVersion = TextView(ctx).apply {
+            text = "Installed: v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})\nRepository: @${AppUpdateManager.GITHUB_OWNER}/${AppUpdateManager.GITHUB_REPO}"
+            textSize = 12f
+            setTextColor(themeColor(com.jarvis.assistant.R.attr.themeTextMuted))
+            setPadding(0, 0, 0, dp(8))
+        }
+        card.addView(tvVersion)
+
+        val tvStatus = TextView(ctx).apply {
+            text = "Tap below to check GitHub for seamless in-place updates without uninstalling."
+            textSize = 13f
+            setTextColor(themeColor(com.jarvis.assistant.R.attr.themeTextPrimary))
+            setPadding(0, 0, 0, dp(12))
+        }
+        card.addView(tvStatus)
+
+        val progressBar = ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal).apply {
+            visibility = View.GONE
+            isIndeterminate = false
+            max = 100
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(8)).apply {
+                bottomMargin = dp(12)
+            }
+        }
+        card.addView(progressBar)
+
+        var latestUpdate: AppUpdateManager.UpdateInfo? = null
+
+        val btnAction = Button(ctx).apply {
+            text = "CHECK FOR UPDATES"
+            background = androidx.core.content.ContextCompat.getDrawable(ctx, com.jarvis.assistant.R.drawable.bg_jarvis_pill_button)
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 13f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+        }
+
+        btnAction.setOnClickListener {
+            val update = latestUpdate
+            if (update != null) {
+                btnAction.isEnabled = false
+                btnAction.text = "DOWNLOADING..."
+                progressBar.visibility = View.VISIBLE
+                progressBar.progress = 0
+                tvStatus.text = "Downloading latest APK update from GitHub..."
+
+                AppUpdateManager.downloadAndInstall(
+                    context = requireContext(),
+                    scope = viewLifecycleOwner.lifecycleScope,
+                    downloadUrl = update.downloadUrl,
+                    onProgress = { progress ->
+                        progressBar.progress = progress
+                        tvStatus.text = "Downloading update: $progress%"
+                        if (progress >= 100) {
+                            btnAction.text = "INSTALLING..."
+                            tvStatus.text = "Download complete! Opening Android installer..."
+                        }
+                    },
+                    onError = { err ->
+                        btnAction.isEnabled = true
+                        btnAction.text = "RETRY UPDATE"
+                        progressBar.visibility = View.GONE
+                        tvStatus.text = "Update error: $err"
+                    }
+                )
+            } else {
+                btnAction.isEnabled = false
+                btnAction.text = "CHECKING..."
+                tvStatus.text = "Querying GitHub releases API..."
+
+                AppUpdateManager.checkForUpdate(viewLifecycleOwner.lifecycleScope) { result ->
+                    btnAction.isEnabled = true
+                    result.onSuccess { info ->
+                        if (info != null && info.downloadUrl.isNotBlank()) {
+                            latestUpdate = info
+                            tvStatus.text = "✓ New update ready: ${info.tagName}\nDirect in-place update will retain all your data."
+                            btnAction.text = "DOWNLOAD & INSTALL UPDATE"
+                        } else {
+                            tvStatus.text = "✓ JARVIS is up to date! (v${BuildConfig.VERSION_NAME})"
+                            btnAction.text = "CHECK AGAIN"
+                        }
+                    }.onFailure { err ->
+                        tvStatus.text = "Could not check updates: ${err.message}"
+                        btnAction.text = "RETRY CHECK"
+                    }
+                }
+            }
+        }
+
+        card.addView(btnAction)
+        list.addView(card)
     }
 
     private fun themeColor(attribute: Int): Int {
